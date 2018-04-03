@@ -8,6 +8,11 @@
 import requests
 import re
 import json
+import asyncio
+import aiohttp
+import random
+import config
+import time
 
 
 class ProxyPool:
@@ -15,27 +20,35 @@ class ProxyPool:
     def __init__(self):
 
         # headers
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36' \
-                     ' (KHTML, like Gecko) Chrome/55.0.2883.87 UBrowser/6.2.3964.2 Safari/537.3'
-        self.headers = {'User-Agent': user_agent}
+        self.user_agents = config.user_agents
 
         # 目标url 和 要爬取的页数
         self.url = 'http://www.xicidaili.com/nn/'
-        self.page_num = 1
+        self.page_num = 5
 
         # 测试用url 和 响应时间
         self.test_url = 'http://ip.chinaz.com/getip.aspx'
-        self.timeout = 3
+        self.timeout = 5
 
         # 暂存的ip、good ip、good ip 存储的文件路径
         self.ips = set()
         self.good_ips = set()
         self.good_ip_txt = 'good_ip.txt'
 
+    def headers(self):
+        headers = {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Accept-Encoding': 'gzip, deflate',
+        }
+        return headers
+
     def _download_html(self, url):
         if not url:
             return None
-        resp = requests.get(url=url, headers=self.headers)
+        resp = requests.get(url=url, headers=self.headers())
         if resp.status_code == 200:
             resp.encoding = 'utf-8'
             return resp.text
@@ -45,33 +58,31 @@ class ProxyPool:
         for i in range(self.page_num):
             url = self.url + str(i+1)
             text = self._download_html(url)
-            ips = re.findall(patt, text, re.S)
-            self.ips.update(ips)
+            ip_tuples = re.findall(patt, text, re.S)
+            self.ips.update(':'.join(ip) for ip in ip_tuples)
 
-    def test_and_save_ip(self):
-        for ip in self.ips:
-            if isinstance(ip, tuple):
-                ip = ':'.join(ip)
-            print(ip, end='\t')
-            proxy = {'http': ip}
-            errors = (requests.exceptions.ReadTimeout,
-                      requests.exceptions.ConnectTimeout,
-                      requests.exceptions.ProxyError,
-                      requests.exceptions.ChunkedEncodingError,
-                      requests.exceptions.ConnectionError
-                      )
-            try:
-                r = requests.get(url=self.test_url, headers=self.headers, proxies=proxy, timeout=self.timeout)
-            except errors:
-                print('bad')
-            else:
-                if r.status_code == 200:
-                    print('good\t\t\t√')
+    async def _test_task(self, ip):
+        proxy = 'http://' + ip
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url=self.test_url, headers=self.headers(), proxy=proxy) as res:
+                    assert res.status == 200
                     self.good_ips.add(ip)
-                else:
-                    print(r.status_code)
+                    # print(ip, 'good\t\t\t√')
+        except Exception:
+            pass
+
+    def validate(self):
+        tasks = [self._test_task(ip) for ip in self.ips]
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(asyncio.wait(tasks))
+        loop.close()
 
     def load(self):
+        """
+        从文件读取ip
+        :return:
+        """
         try:
             with open(self.good_ip_txt, 'r') as f:
                 ips = json.load(f)
@@ -81,16 +92,20 @@ class ProxyPool:
 
     def output(self):
         """
-        存储时，good_ips有可能为空，这时也可写入
+        存储good_ip
         :return:
         """
         with open(self.good_ip_txt, 'w') as f:
             json.dump(list(self.good_ips), f, ensure_ascii=False)
 
     def wash(self):
+        print('get ip...')
         self.load()
         self.get_ip()
-        self.test_and_save_ip()
+        print('start washing ip...')
+        time0 = time.time()
+        self.validate()
+        print('time: {:.2f}'.format(time.time()-time0))
         self.output()
         print('washed:{}/{}'.format(len(self.good_ips), len(self.ips)))
 
