@@ -8,8 +8,8 @@
 import requests
 import re
 import json
-import asyncio
-import aiohttp
+from multiprocessing import Pool
+from multiprocessing import Manager
 import random
 import config
 import time
@@ -19,6 +19,7 @@ class ProxyPool:
 
     def __init__(self):
 
+        # 一些配置
         # headers
         self.user_agents = config.user_agents
 
@@ -34,6 +35,9 @@ class ProxyPool:
         self.ips = set()
         self.good_ips = set()
         self.good_ip_txt = 'good_ip.txt'
+
+        # pool
+        self.pool_num = 30
 
     def headers(self):
         headers = {
@@ -61,22 +65,28 @@ class ProxyPool:
             ip_tuples = re.findall(patt, text, re.S)
             self.ips.update(':'.join(ip) for ip in ip_tuples)
 
-    async def _test_task(self, ip):
-        proxy = 'http://' + ip
+    def _validate_task(self, ip, q):
+        proxy = {'http': ip}
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url=self.test_url, headers=self.headers(), proxy=proxy) as res:
-                    assert res.status == 200
-                    self.good_ips.add(ip)
-                    # print(ip, 'good\t\t\t√')
-        except Exception:
+            res = requests.get(url=self.test_url, headers=self.headers(), proxies=proxy, timeout=self.timeout)
+            if res.status_code == 200:
+                q.put(ip)
+                print(ip, 'good\t√')
+        except Exception as e:
+            print(ip, 'bad')
             pass
 
     def validate(self):
-        tasks = [self._test_task(ip) for ip in self.ips]
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(asyncio.wait(tasks))
-        loop.close()
+        manager = Manager()
+        q = manager.Queue()
+        p = Pool(self.pool_num)
+        for ip in self.ips:
+            p.apply_async(self._validate_task, (ip, q))
+        p.close()
+        p.join()
+        while not q.empty():
+            value = q.get()
+            self.good_ips.add(value)
 
     def load(self):
         """
@@ -102,7 +112,7 @@ class ProxyPool:
         print('get ip...')
         self.load()
         self.get_ip()
-        print('start washing ip...')
+        print('start washing ip, please wait...')
         time0 = time.time()
         self.validate()
         print('time: {:.2f}'.format(time.time()-time0))
